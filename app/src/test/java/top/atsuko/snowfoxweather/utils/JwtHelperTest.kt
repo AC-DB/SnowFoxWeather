@@ -1,5 +1,9 @@
 package top.atsuko.snowfoxweather.utils
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.junit.Assert.*
 import org.junit.BeforeClass
@@ -8,16 +12,15 @@ import java.security.KeyPairGenerator
 import java.security.Security
 import java.security.Signature
 import java.util.Base64
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
+import kotlin.math.abs
 
 class JwtHelperTest {
 
     companion object {
-        // 确保测试环境也加载 BouncyCastle
         @JvmStatic
         @BeforeClass
         fun setUp() {
+            // 确保测试环境加载 BouncyCastle Provider，否则无法识别 EdDSA/Ed25519
             if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
                 Security.addProvider(BouncyCastleProvider())
             }
@@ -25,74 +28,70 @@ class JwtHelperTest {
     }
 
     @Test
-    fun `generateToken returns valid signed JWT`() {
-        // 1. 准备：生成一对临时的 EdDSA 测试密钥
+    fun `generateTokenInfo returns correct expiry information`() {
+        // 1. 准备密钥
         val kpg = KeyPairGenerator.getInstance("Ed25519", "BC")
         val keyPair = kpg.generateKeyPair()
-        val privateKey = keyPair.private
-        val publicKey = keyPair.public
-
-        // 将私钥转换为 PEM 格式字符串 (模拟真实输入)
-        val privateKeyBytes = privateKey.encoded
-        val privateKeyBase64 = Base64.getEncoder().encodeToString(privateKeyBytes)
+        val privateKeyBase64 = Base64.getEncoder().encodeToString(keyPair.private.encoded)
         val mockPrivateKeyContent = "-----BEGIN PRIVATE KEY-----\n$privateKeyBase64\n-----END PRIVATE KEY-----"
 
-        val mockKeyId = "test-key-id"
-        val mockProjectId = "test-project-id"
-
-        // 2. 执行：调用 JwtHelper (传入测试密钥)
-        val token = JwtHelper.generateToken(
+        // 2. 执行测试
+        val result = JwtHelper.generateTokenInfo(
             privateKeyContent = mockPrivateKeyContent,
-            keyId = mockKeyId,
-            projectId = mockProjectId
+            keyId = "kid",
+            projectId = "sub"
         )
 
-        // 3. 验证：Token 结构
-        assertNotNull("Token should not be null", token)
-        assertTrue("Token should not be empty", token.isNotEmpty())
+        // 3. 验证结果对象
+        assertNotNull("TokenResult 不应为空", result)
+        assertTrue("Token 字符串不应为空", result!!.token.isNotEmpty())
 
+        // 验证过期时间
+        // JwtHelper 逻辑：iat = now - 30s, exp = iat + 900s
+        // 所以预期过期时间 = now + 870s
+        val currentTime = System.currentTimeMillis() / 1000
+        val expectedExpiry = currentTime + 870
+
+        // 允许 5 秒左右的计算/执行误差
+        val diff = abs(result.expiresAt - expectedExpiry)
+        assertTrue("过期时间应接近当前时间+870秒 (实际差值: $diff)", diff < 5)
+
+        // 4. 验证 Token 内容
+        verifyJwtContent(result.token, "kid", "sub", keyPair.public)
+    }
+
+    /**
+     * 辅助方法：验证 JWT 的 Header, Payload 和 签名
+     */
+    private fun verifyJwtContent(token: String, expectedKeyId: String, expectedSub: String, publicKey: java.security.PublicKey) {
         val parts = token.split(".")
-        assertEquals("JWT should have 3 parts", 3, parts.size)
-
         val headerJson = String(Base64.getUrlDecoder().decode(parts[0]))
         val payloadJson = String(Base64.getUrlDecoder().decode(parts[1]))
+
+        // 使用 Kotlinx Serialization 解析 JSON
+        val headerMap = Json.decodeFromString<JsonObject>(headerJson)
+        val payloadMap = Json.decodeFromString<JsonObject>(payloadJson)
+
+        // 验证 Header
+        assertEquals("EdDSA", headerMap["alg"]?.jsonPrimitive?.content)
+        assertEquals(expectedKeyId, headerMap["kid"]?.jsonPrimitive?.content)
+
+        // 验证 Payload
+        assertEquals(expectedSub, payloadMap["sub"]?.jsonPrimitive?.content)
+        val iat = payloadMap["iat"]?.jsonPrimitive?.long ?: 0L
+        val exp = payloadMap["exp"]?.jsonPrimitive?.long ?: 0L
+
+        // 验证 exp - iat 是否正好是 900 秒（15分钟）
+        assertEquals("有效期应为 900 秒", 900, exp - iat)
+
+        // 验证签名
+        val contentToVerify = "${parts[0]}.${parts[1]}"
         val signatureBytes = Base64.getUrlDecoder().decode(parts[2])
 
-        // 4. 验证：Header 内容
-        val gson = Gson()
-        val headerMap: Map<String, Any> = gson.fromJson(headerJson, object : TypeToken<Map<String, Any>>() {}.type)
-        assertEquals("EdDSA", headerMap["alg"])
-        assertEquals(mockKeyId, headerMap["kid"])
-
-        // 5. 验证：Payload 内容
-        val payloadMap: Map<String, Any> = gson.fromJson(payloadJson, object : TypeToken<Map<String, Any>>() {}.type)
-        assertEquals(mockProjectId, payloadMap["sub"])
-
-        // 验证时间戳 (宽容度测试)
-        val iat = (payloadMap["iat"] as Number).toLong()
-        val exp = (payloadMap["exp"] as Number).toLong()
-        assertEquals("Exp should be iat + 900", 900, exp - iat)
-
-        // 6. 验证：签名有效性 (最关键的一步)
-        // 使用公钥解密/验证签名，确保是由对应的私钥签发的
-        val contentToVerify = "${parts[0]}.${parts[1]}"
         val verifier = Signature.getInstance("EdDSA", "BC")
         verifier.initVerify(publicKey)
         verifier.update(contentToVerify.toByteArray())
 
-        val isVerified = verifier.verify(signatureBytes)
-        assertTrue("Signature verification failed", isVerified)
-    }
-
-    @Test
-    fun `generateToken handles invalid key gracefully`() {
-        // 测试传入垃圾数据时是否不会崩溃
-        val token = JwtHelper.generateToken(
-            privateKeyContent = "invalid-key-data",
-            keyId = "id",
-            projectId = "project"
-        )
-        // 根据目前代码逻辑，发生异常通过 printStackTrace 捕获并返回空字符串
-        assertEquals("", token)
+        assertTrue("签名验证失败", verifier.verify(signatureBytes))
     }
 }

@@ -82,9 +82,9 @@ dependencies {
 
     // ==================== 网络相关 ====================
     implementation(libs.retrofit)                                       // Retrofit 网络请求
-    implementation(libs.converter.gson)                                 // Gson 序列化
-    implementation(libs.retrofit2.kotlinx.serialization.converter)      // Kotlin 序列化转换器
     implementation(libs.logging.interceptor)                            // OkHttp 日志拦截器
+    implementation(libs.kotlinx.serialization.json)                     // Kotlinx Serialization JSON
+    implementation(libs.retrofit.converter.kotlinx.serialization)       // Retrofit Kotlinx Serialization 转换器
     implementation(libs.coil.compose)                                   // coil 图片加载组件
     implementation(libs.coil.network.okhttp)                            // coil OkHttp 支持
     implementation(libs.converter.scalars)                              // 字符串转换器
